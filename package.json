@@ -1,0 +1,23 @@
+{
+  "name": "attendance-telegram-bot",
+  "version": "1.0.0",
+  "description": "Davomat Telegram Bot",
+  "main": "src/bot.js",
+  "type": "module",
+  "scripts": {
+    "start": "node src/bot.js",
+    "dev": "nodemon src/bot.js"
+  },
+  "dependencies": {
+    "telegraf": "^4.15.0",
+    "firebase-admin": "^11.11.0",
+    "dotenv": "^16.3.1",
+    "node-fetch": "^3.3.2"
+  },
+  "devDependencies": {
+    "nodemon": "^3.0.2"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  }
+}

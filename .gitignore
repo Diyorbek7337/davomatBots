@@ -1,0 +1,6 @@
+.env
+.env.*
+serviceAccountKey.json
+node_modules/
+dist/
+build/
