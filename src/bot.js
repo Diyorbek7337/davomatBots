@@ -108,8 +108,8 @@ function formatTime(timestamp) {
   if (!timestamp) return '-';
   try {
     const date = timestamp.toDate ? timestamp.toDate() : new Date(timestamp);
-    return date.toLocaleTimeString('uz-UZ', { 
-      hour: '2-digit', 
+    return date.toLocaleTimeString('uz-UZ', {
+      hour: '2-digit',
       minute: '2-digit',
       timeZone: 'Asia/Tashkent'
     });
@@ -118,14 +118,21 @@ function formatTime(timestamp) {
   }
 }
 
-function getTodayString() {
+// Toshkent vaqti (UTC+5) - barcha solishtirish uchun
+function getTashkentNow() {
   const now = new Date();
-  return `${now.getFullYear()}-${String(now.getMonth()+1).padStart(2,'0')}-${String(now.getDate()).padStart(2,'0')}`;
+  const utcMs = now.getTime() + (now.getTimezoneOffset() * 60000);
+  return new Date(utcMs + (5 * 60 * 60 * 1000));
+}
+
+function getTodayString() {
+  const t = getTashkentNow();
+  return `${t.getFullYear()}-${String(t.getMonth()+1).padStart(2,'0')}-${String(t.getDate()).padStart(2,'0')}`;
 }
 
 function getCurrentTime() {
-  return new Date().toLocaleTimeString('uz-UZ', { 
-    hour: '2-digit', 
+  return new Date().toLocaleTimeString('uz-UZ', {
+    hour: '2-digit',
     minute: '2-digit',
     timeZone: 'Asia/Tashkent'
   });
@@ -208,30 +215,32 @@ async function getTodayAttendance(employeeId) {
 async function checkIn(employee, location) {
   try {
     const today = getTodayString();
-    const now = new Date();
-    
+    const now = new Date();           // real UTC (ISO saqlash uchun)
+    const tNow = getTashkentNow();    // Toshkent vaqti (solishtirish uchun)
+
     const existing = await getTodayAttendance(employee.id);
     if (existing?.checkIn) {
       throw new Error('Siz bugun allaqachon keldingiz qayd etgansiz');
     }
-    
+
     const workStartTime = employee.workStartTime || DEFAULT_WORK_START;
     const lateThreshold = employee.lateThreshold || DEFAULT_LATE_THRESHOLD;
-    
+
     const [startHour, startMin] = workStartTime.split(':').map(Number);
-    
-    const workStartWithThreshold = new Date();
+
+    // Toshkent vaqtida solishtirish
+    const workStartWithThreshold = new Date(tNow);
     workStartWithThreshold.setHours(startHour, startMin + lateThreshold, 0, 0);
-    
-    const actualStart = new Date();
+
+    const actualStart = new Date(tNow);
     actualStart.setHours(startHour, startMin, 0, 0);
-    
+
     let isLate = false;
     let lateMinutes = 0;
-    
-    if (now > workStartWithThreshold) {
+
+    if (tNow > workStartWithThreshold) {
       isLate = true;
-      lateMinutes = Math.floor((now - actualStart) / 1000 / 60);
+      lateMinutes = Math.floor((tNow - actualStart) / 1000 / 60);
     }
     
     const data = {
@@ -264,37 +273,45 @@ async function checkIn(employee, location) {
 async function checkOut(employee, location) {
   try {
     const existing = await getTodayAttendance(employee.id);
-    
+
     if (!existing?.checkIn) {
       throw new Error('Avval "📥 Keldim" tugmasini bosing');
     }
-    
+
     if (existing.checkOut) {
       throw new Error('Siz bugun allaqachon ketdingiz qayd etgansiz');
     }
-    
-    const now = new Date();
+
+    const now = new Date();           // real UTC (ISO saqlash uchun)
+    const tNow = getTashkentNow();    // Toshkent vaqti (solishtirish uchun)
     const workEndTime = employee.workEndTime || DEFAULT_WORK_END;
     const [endHour, endMin] = workEndTime.split(':').map(Number);
-    
-    const workEnd = new Date();
+
+    // Toshkent vaqtida erta ketishni solishtirish
+    const workEnd = new Date(tNow);
     workEnd.setHours(endHour, endMin, 0, 0);
-    
+
     let isEarlyLeave = false;
     let earlyMinutes = 0;
-    
-    if (now < workEnd) {
+
+    if (tNow < workEnd) {
       isEarlyLeave = true;
-      earlyMinutes = Math.floor((workEnd - now) / 1000 / 60);
+      earlyMinutes = Math.floor((workEnd - tNow) / 1000 / 60);
     }
-    
+
+    // Ishlagan vaqtni haqiqiy UTC vaqtdan hisoblash
+    let workedMinutes = 0;
     let workedHours = 0;
     if (existing.checkInTime) {
       const checkInDate = new Date(existing.checkInTime);
-      const workedMinutes = Math.floor((now - checkInDate) / 1000 / 60);
+      workedMinutes = Math.max(0, Math.floor((now - checkInDate) / 1000 / 60));
       workedHours = Math.round(workedMinutes / 60 * 100) / 100;
     }
-    
+
+    // Kunlik maoshni hisoblash va saqlash
+    const hourlyRate = employee.hourlyRate || 0;
+    const dailySalary = hourlyRate > 0 ? Math.round(workedHours * hourlyRate) : 0;
+
     await db.collection('attendance').doc(existing.id).update({
       checkOut: admin.firestore.FieldValue.serverTimestamp(),
       checkOutTime: now.toISOString(),
@@ -302,11 +319,12 @@ async function checkOut(employee, location) {
       isEarlyLeave,
       earlyMinutes,
       expectedEndTime: workEndTime,
-      workedMinutes: Math.round(workedHours * 60),
-      workedHours
+      workedMinutes,
+      workedHours,
+      dailySalary
     });
-    
-    return { isEarlyLeave, earlyMinutes, workedHours, workEndTime };
+
+    return { isEarlyLeave, earlyMinutes, workedHours, workEndTime, dailySalary };
   } catch (error) {
     console.error('checkOut xatosi:', error);
     throw error;
@@ -363,9 +381,9 @@ async function createLeaveRequest(data) {
 async function sendMorningReminders() {
   try {
     const employees = await getAllEmployees();
-    const now = new Date();
-    const currentHour = now.getHours();
-    const currentMin = now.getMinutes();
+    const tNow = getTashkentNow();
+    const currentHour = tNow.getHours();
+    const currentMin = tNow.getMinutes();
     
     for (const emp of employees) {
       if (!emp.telegramId) continue;
@@ -405,7 +423,8 @@ async function sendMorningReminders() {
 async function sendLateReminders() {
   try {
     const employees = await getAllEmployees();
-    const now = new Date();
+    const tNow = getTashkentNow();
+    const now = tNow; // solishtirish uchun Toshkent vaqti
     const today = getTodayString();
     
     for (const emp of employees) {
@@ -454,9 +473,9 @@ async function sendLateReminders() {
 async function sendEndOfDayReminders() {
   try {
     const employees = await getAllEmployees();
-    const now = new Date();
-    const currentHour = now.getHours();
-    const currentMin = now.getMinutes();
+    const tNow = getTashkentNow();
+    const currentHour = tNow.getHours();
+    const currentMin = tNow.getMinutes();
     
     for (const emp of employees) {
       if (!emp.telegramId) continue;
@@ -506,9 +525,9 @@ function clearOldReminders() {
   }
 }
 
-// Run reminders every minute
+// Run reminders every minute (Toshkent vaqtida)
 setInterval(() => {
-  const hour = new Date().getHours();
+  const hour = getTashkentNow().getHours();
   if (hour >= 7 && hour <= 20) {
     sendMorningReminders();
     sendLateReminders();
@@ -613,14 +632,17 @@ bot.on('location', async (ctx) => {
       await ctx.reply(msg, { parse_mode: 'Markdown', ...mainKeyboard });
     } else {
       const result = await checkOut(employee, locationData);
-      
+
       let msg = `✅ *Ketganingiz qayd etildi!*\n\n👤 ${employee.name}\n🕐 ${getCurrentTime()}\n⏱ Ishlagan: *${result.workedHours} soat*`;
-      
-      if (employee.hourlyRate > 0) {
-        const earned = Math.round(result.workedHours * employee.hourlyRate);
-        msg += `\n💰 Bugun: *${earned.toLocaleString()} so'm*`;
+
+      if (result.dailySalary > 0) {
+        msg += `\n💰 Bugungi maosh: *${result.dailySalary.toLocaleString()} so'm*`;
       }
-      
+
+      if (result.isEarlyLeave) {
+        msg += `\n\n⚠️ Erta ketdingiz: *${result.earlyMinutes} daq* qolgan edi`;
+      }
+
       await ctx.reply(msg, { parse_mode: 'Markdown', ...mainKeyboard });
     }
     
